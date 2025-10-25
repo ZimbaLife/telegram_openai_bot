@@ -3,6 +3,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import replicate
 import asyncio
+import time
 from together import Together
 
 # Load environment variables from .env file
@@ -39,15 +40,34 @@ async def generate_video(prompt: str) -> str:
     def run_video():
         client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
         # Create a new video job
-        response = client.videos.create(
+        job = client.videos.create(
             model="kwaivgI/kling-2.1-standard",
             prompt=prompt
         )
-        # Retrieve the result (will wait until completed)
-        video_response = client.videos.retrieve(response.id)
-        # Attempt to extract URL from response
-        if isinstance(video_response, dict):
-            return video_response.get("video_url") or video_response.get("output_url") or next(iter(video_response.values()), None)
-        # If response object has 'output' attribute
-        return getattr(video_response, "output", video_response)
+        # Poll the job until it's completed
+        while True:
+            result = client.videos.retrieve(job.id)
+            # Determine status
+            status = None
+            if isinstance(result, dict):
+                status = result.get("status")
+            else:
+                status = getattr(result, "status", None)
+            if status in ("succeeded", "completed", "completed_successfully"):
+                # Extract video URL
+                if isinstance(result, dict):
+                    video_url = result.get("video_url") or result.get("output_url")
+                    if not video_url:
+                        output = result.get("output")
+                        if isinstance(output, list):
+                            video_url = output[0]
+                        else:
+                            video_url = output
+                    return video_url
+                else:
+                    return getattr(result, "video_url", None) or getattr(result, "output_url", None) or getattr(result, "output", None)
+            if status in ("failed", "error"):
+                return None
+            # Sleep before next poll
+            time.sleep(1)
     return await asyncio.to_thread(run_video)
