@@ -1,45 +1,49 @@
 import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.error import Conflict
 from dotenv import load_dotenv
+
 from openai_client import generate_text, generate_image, generate_video
+
 
 # Load environment variables from .env
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
+
 class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def do_GET(self) -> None:
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
 
-def run_server():
-    # Render passes the port via environment variable PORT
+
+def run_server() -> None:
+    """Start a minimal HTTP server so Render sees an open port."""
     port = int(os.environ.get("PORT", "10000"))
     server = HTTPServer(("0.0.0.0", port), SimpleHandler)
     server.serve_forever()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Приветствие и вывод меню с кнопками.
-    """
-    keyboard = [["📝 Сгенерировать текст", "🎨 Создать изображение", "🎬 Создать видео"]]
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send greeting and show the reply keyboard."""
+    keyboard = [
+        ["📝 Сгенерировать текст", "🎨 Создать изображение", "🎬 Создать видео"],
+    ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "Привет! Я бот с AI.\n"
-        "Выберите действие:",
-        reply_markup=reply_markup
+        "Привет! Я бот с AI.\nВыберите действие:",
+        reply_markup=reply_markup,
     )
-    # Сброс состояния ожидания
     context.user_data["awaiting"] = None
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обрабатывает нажатия на кнопки и последующие запросы.
-    """
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle button presses and subsequent prompts."""
     text = update.message.text
     awaiting = context.user_data.get("awaiting")
 
@@ -48,11 +52,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введите запрос для генерации текста:")
         context.user_data["awaiting"] = "text"
         return
-    elif text == "🎨 Создать изображение":
+
+    if text == "🎨 Создать изображение":
         await update.message.reply_text("Введите запрос для генерации изображения:")
         context.user_data["awaiting"] = "image"
         return
-    elif text == "🎬 Создать видео":
+
+    if text == "🎬 Создать видео":
         await update.message.reply_text("Введите запрос для генерации видео:")
         context.user_data["awaiting"] = "video"
         return
@@ -71,7 +77,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             context.user_data["awaiting"] = None
         return
-    elif awaiting == "image":
+
+    if awaiting == "image":
         prompt = text.strip()
         if not prompt:
             await update.message.reply_text("Введите корректный запрос для генерации изображения.")
@@ -84,7 +91,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             context.user_data["awaiting"] = None
         return
-    elif awaiting == "video":
+
+    if awaiting == "video":
         prompt = text.strip()
         if not prompt:
             await update.message.reply_text("Введите корректный запрос для генерации видео.")
@@ -101,14 +109,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Default message if no known command is selected
     await update.message.reply_text("Выберите действие, используя кнопки.")
 
-def main():
+
+def main() -> None:
+    """Run the Telegram bot and simple HTTP server."""
     # Start simple HTTP server in a background thread to satisfy Render port check
     threading.Thread(target=run_server, daemon=True).start()
 
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.run_polling()
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+
+    try:
+        application.run_polling()
+    except Conflict:
+        # Avoid multiple long-polling instances if Render spawns parallel containers
+        print("Another instance is running; exiting to avoid conflict.")
+
 
 if __name__ == "__main__":
     main()
