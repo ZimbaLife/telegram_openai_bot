@@ -1,31 +1,36 @@
 import os
 from openai import OpenAI
 from dotenv import load_dotenv
+import replicate
+import asyncio
 
-# Загружаем переменные окружения из файла .env
+# Load environment variables from .env file
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# Text generation using OpenAI Chat
 async def generate_text(prompt: str) -> str:
     """
-    Генерирует текстовый ответ на основе переданной строки prompt
-    с использованием модели gpt‑4o‑mini.
+    Generates a text response based on the given prompt
+    using the GPT ‑4o ‑mini model.
     """
-    response = client.chat.completions.create(
+    response = openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=500
     )
     return response.choices[0].message.content.strip()
 
+# Image generation using Replicate (ideogram-v3-turbo or other model)
 async def generate_image(prompt: str) -> str:
     """
-    Генерирует изображение (URL) по описанию prompt
-    с использованием OpenAI image API.
+    Generates an image (URL) from a description using a Replicate model.
     """
-    result = client.images.generate(
-        model="gpt-image-1",
-        prompt=prompt,
-        size="1024x1024"
-    )
-    return result.data[0].url
+    def run_model():
+        output = replicate.run(
+            "ideogram-ai/ideogram-v3-turbo",
+            input={"prompt": prompt}
+        )
+        return output[0] if isinstance(output, list) else output
+
+    return await asyncio.to_thread(run_model)
