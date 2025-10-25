@@ -2,7 +2,7 @@ import os
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
-from openai_client import generate_text, generate_image
+from openai_client import generate_text, generate_image, generate_video
 
 # Load environment variables from .env
 load_dotenv()
@@ -12,11 +12,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Приветствие и вывод меню с кнопками.
     """
-    keyboard = [["📝 Сгенерировать текст", "🎨 Создать изображение"]]
+    keyboard = [["📝 Сгенерировать текст", "🎨 Создать изображение", "🎬 Создать видео"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
         "Привет! Я бот с AI.\n"
-        "Выберите действие:", reply_markup=reply_markup
+        "Выберите действие:",
+        reply_markup=reply_markup
     )
     # Сброс состояния ожидания
     context.user_data["awaiting"] = None
@@ -27,40 +28,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     text = update.message.text
     awaiting = context.user_data.get("awaiting")
+
+    # Determine which action the user selected
     if text == "📝 Сгенерировать текст":
         await update.message.reply_text("Введите запрос для генерации текста:")
         context.user_data["awaiting"] = "text"
+        return
     elif text == "🎨 Создать изображение":
-        await update.message.reply_text("Опишите картинку, которую хотите получить:")
+        await update.message.reply_text("Введите запрос для генерации изображения:")
         context.user_data["awaiting"] = "image"
-    else:
-        if awaiting == "text":
-            if not text.strip():
-                await update.message.reply_text("❗ Напиши запрос для генерации текста.")
-                return
-            await update.message.reply_text("Генерирую ответ... ⏳")
-            result = await generate_text(text)
-            await update.message.reply_text(result)
+        return
+    elif text == "🎬 Создать видео":
+        await update.message.reply_text("Введите запрос для генерации видео:")
+        context.user_data["awaiting"] = "video"
+        return
+
+    # Handle the awaiting state
+    if awaiting == "text":
+        prompt = text.strip()
+        if not prompt:
+            await update.message.reply_text("Введите корректный запрос для генерации текста.")
+            return
+        try:
+            response = await generate_text(prompt)
+            await update.message.reply_text(response)
+        except Exception:
+            await update.message.reply_text("Произошла ошибка при генерации текста. Попробуйте позже.")
+        finally:
             context.user_data["awaiting"] = None
-        elif awaiting == "image":
-            if not text.strip():
-                await update.message.reply_text("❗ Напиши описание для изображения.")
-                return
-            await update.message.reply_text("Создаю изображение... 🎨")
-            image_url = await generate_image(text)
-            await update.message.reply_photo(image_url)
+        return
+    elif awaiting == "image":
+        prompt = text.strip()
+        if not prompt:
+            await update.message.reply_text("Введите корректный запрос для генерации изображения.")
+            return
+        try:
+            image_url = await generate_image(prompt)
+            await update.message.reply_photo(photo=image_url)
+        except Exception:
+            await update.message.reply_text("Произошла ошибка при генерации изображения. Попробуйте позже.")
+        finally:
             context.user_data["awaiting"] = None
-        else:
-            await update.message.reply_text("Пожалуйста, выберите действие из меню.")
+        return
+    elif awaiting == "video":
+        prompt = text.strip()
+        if not prompt:
+            await update.message.reply_text("Введите корректный запрос для генерации видео.")
+            return
+        try:
+            video_url = await generate_video(prompt)
+            await update.message.reply_video(video=video_url)
+        except Exception:
+            await update.message.reply_text("Произошла ошибка при генерации видео. Попробуйте позже.")
+        finally:
+            context.user_data["awaiting"] = None
+        return
+
+    # Default message if no known command is selected
+    await update.message.reply_text("Выберите действие, используя кнопки.")
 
 def main():
-    """
-    Создаёт и запускает бота в режиме long polling.
-    """
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    app.run_polling()
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
