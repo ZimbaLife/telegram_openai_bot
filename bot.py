@@ -1,4 +1,6 @@
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
@@ -7,6 +9,18 @@ from openai_client import generate_text, generate_image, generate_video
 # Load environment variables from .env
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_server():
+    # Render passes the port via environment variable PORT
+    port = int(os.environ.get("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -88,6 +102,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Выберите действие, используя кнопки.")
 
 def main():
+    # Start simple HTTP server in a background thread to satisfy Render port check
+    threading.Thread(target=run_server, daemon=True).start()
+
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
