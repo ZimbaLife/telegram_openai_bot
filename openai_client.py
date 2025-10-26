@@ -35,13 +35,13 @@ async def generate_image(prompt: str) -> str:
 
 async def generate_video(prompt: str) -> str:
     """
-    Generates a video URL from a description using Together AI Kling 2.1 Standard model.
+    Generates a video URL from a description using Together AI Kling 1.6 Standard model.
     """
     def run_video():
         client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
         # Create a new video job
         job = client.videos.create(
-            model="kwaivgI/kling-2.1-standard",
+            model="kwaivgI/kling-1.6-standard",
             prompt=prompt
         )
         # Poll the job until it's completed
