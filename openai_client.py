@@ -1,75 +1,61 @@
 import os
-import asyncio
 import time
-from dotenv import load_dotenv
+import logging
 from together import Together
-import replicate
-from openai import OpenAI
 
-# Загружаем .env
-load_dotenv()
-
-# Инициализация клиентов
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+LOG = logging.getLogger("video")
 together_client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
 
-# ==== ТЕКСТ ====
-async def generate_text(prompt: str) -> str:
-    """
-    Генерация текста через OpenAI (GPT-4o-mini)
-    """
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=500
-    )
-    return response.choices[0].message.content.strip()
+def _require_together_key():
+    if not os.getenv("TOGETHER_API_KEY"):
+        raise RuntimeError("TOGETHER_API_KEY is not set in environment")
 
+def _extract_video_url(outputs):
+    # вместе с video_url могут приходить output_url / output (иногда как список)
+    for key in ("video_url", "output_url", "output"):
+        url = getattr(outputs, key, None)
+        if isinstance(url, list):
+            return url[0] if url else None
+        if url:
+            return url
+    return None
 
-# ==== ИЗОБРАЖЕНИЯ ====
-async def generate_image(prompt: str) -> str:
-    """
-    Генерация изображения через Replicate (Ideogram v3 Turbo)
-    """
-    def run_model():
-        output = replicate.run(
-            "ideogram-ai/ideogram-v3-turbo",
-            input={"prompt": prompt}
-        )
-        return output[0]
-
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, run_model)
-
-
-# ==== ВИДЕО ====
 async def generate_video(prompt: str) -> str | None:
     """
-    Генерация видео через Together AI (MiniMax 01 Director)
-    Возвращает URL готового видео или None при ошибке
+    Генерация видео через Together AI (MiniMax 01 Director).
+    Возвращает URL видео или None при ошибке.
     """
-    job = together_client.videos.create(
-        prompt=prompt,
-        model="minimax/video-01-director",
-        width=1280,     # стандартное 720p
-        height=720
-    )
+    try:
+        _require_together_key()
 
-    # Проверяем статус каждые 5 секунд
-    while True:
-        status = together_client.videos.retrieve(job.id)
-        if status.status == "completed":
-            video_url = getattr(status.outputs, "video_url", None)
-            if not video_url:
-                # На случай, если API вернёт список или другое поле
-                video_url = getattr(status.outputs, "output_url", None) or getattr(status.outputs, "output", None)
-            if isinstance(video_url, list):
-                return video_url[0]
-            return video_url
+        # Ровно как в доках Together: 1366x768
+        job = together_client.videos.create(
+            prompt=prompt,
+            model="minimax/video-01-director",
+            width=1366,
+            height=768,
+        )
+        LOG.info("Together video job created: id=%s model=%s", getattr(job, "id", None), "minimax/video-01-director")
 
-        elif status.status in ("failed", "cancelled"):
-            return None
+        # Пуллим статус
+        while True:
+            status = together_client.videos.retrieve(job.id)
+            LOG.info("Video status: id=%s status=%s errors=%s", status.id, status.status, getattr(status.info, "errors", None))
 
-        time.sleep(5)
+            if status.status == "completed":
+                url = _extract_video_url(status.outputs)
+                if not url:
+                    LOG.error("Completed but no URL in outputs: %s", status.outputs)
+                return url
 
+            if status.status in ("failed", "cancelled"):
+                # Вытащим причину и залогируем
+                LOG.error("Video generation failed: info=%s inputs=%s", status.info, status.inputs)
+                return None
 
+            time.sleep(5)
+
+    except Exception as e:
+        # Логируем исключение от SDK (например 401/403/404/429/402 No quota)
+        LOG.exception("Together video exception: %r", e)
+        return None
