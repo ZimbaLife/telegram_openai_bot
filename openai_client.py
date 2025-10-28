@@ -41,7 +41,7 @@ async def generate_video(prompt: str) -> str:
     def run_video():
         job = together_client.videos.create(
             prompt=prompt,
-            model="kling-1.6-standard",
+            model="kwaivgi/kling-1.6-standard",
             width=1024,
             height=576,
         )
