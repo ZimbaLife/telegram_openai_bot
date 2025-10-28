@@ -2,14 +2,13 @@ import os
 import asyncio
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, UTC
 
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Update
 from telegram.ext import (
     Application, AIORateLimiter,
-    CommandHandler, CallbackQueryHandler,
-    ContextTypes
+    CommandHandler, ContextTypes,
 )
 
 from openai_client import (
@@ -36,16 +35,18 @@ def build_app() -> Application:
     return (
         Application.builder()
         .token(BOT_TOKEN)
-        .rate_limiter(AIORateLimiter())
+        .rate_limiter(AIORateLimiter())  # работает при наличии python-telegram-bot[rate-limiter]
         .build()
     )
 
 
 # ---------- вспомогательные функции ----------
-def progress_text(prompt: str, started_at: datetime) -> str:
-    avg = 90
-    elapsed = int((datetime.utcnow() - started_at).total_seconds())
-    remain = max(0, avg - elapsed)
+def now_utc():
+    return datetime.now(UTC)
+
+def progress_text(prompt: str, started_at: datetime, avg_sec: int = 90) -> str:
+    elapsed = int((now_utc() - started_at).total_seconds())
+    remain = max(0, avg_sec - elapsed)
     short_prompt = (prompt[:100] + "…") if len(prompt) > 100 else prompt
     return (
         "🎬 Генерирую видео…\n"
@@ -113,36 +114,48 @@ async def cmd_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prompt = prompt[:600]
 
     user_id = update.effective_user.id
-    started_at = datetime.utcnow()
+    started_at = now_utc()
 
-    msg = await update.message.reply_text(progress_text(prompt, started_at))
+    # первый статус
+    last_shown = None
+    status_text = progress_text(prompt, started_at)
+    msg = await update.message.reply_text(status_text)
+    last_shown = status_text
 
     async def worker():
+        nonlocal last_shown
         async with USER_LOCKS[user_id]:
             async with VIDEO_SEM:
-                if model == "minimax":
-                    video_func = generate_video_minimax
-                else:
-                    video_func = generate_video_kling
+                video_func = generate_video_minimax if model == "minimax" else generate_video_kling
 
-                # таймер обновления статуса
+                # мягкий тайм-аут на фоне (видео может рендериться долго из-за очереди)
                 refresh_every = 10
+                max_wait = 900  # 15 минут максимум
                 elapsed = 0
                 url = None
 
-                while elapsed < 120:  # максимум 2 минуты ожидания
+                while elapsed < max_wait:
                     try:
                         url = await video_func(prompt)
                         if url:
                             break
+                        # если URL ещё нет — подождём и обновим статус
                         await asyncio.sleep(refresh_every)
                         elapsed += refresh_every
-                        await msg.edit_text(progress_text(prompt, started_at))
+                        new_text = progress_text(prompt, started_at, avg_sec=120)
+                        # не шлём одинаковый текст, чтобы избежать 400 "Message is not modified"
+                        if new_text != last_shown:
+                            try:
+                                await msg.edit_text(new_text)
+                                last_shown = new_text
+                            except Exception as e:
+                                LOG.warning(f"edit_text warning: {e}")
                     except Exception as e:
                         LOG.error(f"Video generation error: {e}")
                         break
 
                 if url:
+                    # удалим статус и пришлём видео
                     try:
                         await msg.delete()
                     except Exception:
@@ -152,7 +165,10 @@ async def cmd_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         await update.message.reply_text(f"Готово! Ссылка: {url}")
                 else:
-                    await msg.edit_text("⚠️ Не удалось сгенерировать видео. Попробуй позже.")
+                    try:
+                        await msg.edit_text("⚠️ Не удалось сгенерировать видео. Попробуй позже.")
+                    except Exception:
+                        await update.message.reply_text("⚠️ Не удалось сгенерировать видео. Попробуй позже.")
 
     context.application.create_task(worker())
 
@@ -168,4 +184,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
