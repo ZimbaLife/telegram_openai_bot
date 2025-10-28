@@ -1,19 +1,22 @@
 import os
-from openai import OpenAI
-from dotenv import load_dotenv
-import replicate
 import asyncio
-from together import Together
 import time
+from dotenv import load_dotenv
+from together import Together
+import replicate
+from openai import OpenAI
 
-# Load environment variables from .env file
+# Загружаем .env
 load_dotenv()
+
+# Инициализация клиентов
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 together_client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
 
+# ==== ТЕКСТ ====
 async def generate_text(prompt: str) -> str:
     """
-    Generates a text response based on the given prompt using the GPT-4o-mini model.
+    Генерация текста через OpenAI (GPT-4o-mini)
     """
     response = openai_client.chat.completions.create(
         model="gpt-4o-mini",
@@ -22,38 +25,51 @@ async def generate_text(prompt: str) -> str:
     )
     return response.choices[0].message.content.strip()
 
+
+# ==== ИЗОБРАЖЕНИЯ ====
 async def generate_image(prompt: str) -> str:
     """
-    Generates an image (URL) from a description using a Replicate model.
+    Генерация изображения через Replicate (Ideogram v3 Turbo)
     """
     def run_model():
         output = replicate.run(
             "ideogram-ai/ideogram-v3-turbo",
             input={"prompt": prompt}
         )
-        return output[0] if isinstance(output, list) else output
-    return await asyncio.to_thread(run_model)
+        return output[0]
 
-async def generate_video(prompt: str) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, run_model)
+
+
+# ==== ВИДЕО ====
+async def generate_video(prompt: str) -> str | None:
     """
-    Generates a video URL from a description using a Together AI model.
+    Генерация видео через Together AI (MiniMax 01 Director)
+    Возвращает URL готового видео или None при ошибке
     """
-    def run_video():
-        job = together_client.videos.create(
-            prompt=prompt,
-            model="kwaivgi/kling-1.6-standard",
-            width=1024,
-            height=576,
-        )
-        while True:
-            current_job = together_client.jobs.get(job.id)
-            status = getattr(current_job, "status", None)
-            if status in ["succeeded", "completed", "completed_successfully", "finished"]:
-                url = getattr(current_job, "video_url", None) or getattr(current_job, "output_url", None) or getattr(current_job, "output", None)
-                if isinstance(url, list):
-                    return url[0]
-                return url
-            if status in ["failed", "error"]:
-                return None
-            time.sleep(1)
-    return await asyncio.to_thread(run_video)
+    job = together_client.videos.create(
+        prompt=prompt,
+        model="minimax/video-01-director",
+        width=1280,     # стандартное 720p
+        height=720
+    )
+
+    # Проверяем статус каждые 5 секунд
+    while True:
+        status = together_client.videos.retrieve(job.id)
+        if status.status == "completed":
+            video_url = getattr(status.outputs, "video_url", None)
+            if not video_url:
+                # На случай, если API вернёт список или другое поле
+                video_url = getattr(status.outputs, "output_url", None) or getattr(status.outputs, "output", None)
+            if isinstance(video_url, list):
+                return video_url[0]
+            return video_url
+
+        elif status.status in ("failed", "cancelled"):
+            return None
+
+        time.sleep(5)
+
+
