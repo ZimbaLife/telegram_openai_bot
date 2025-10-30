@@ -1,188 +1,129 @@
 import os
 import asyncio
 import logging
-from collections import defaultdict
-from datetime import datetime, UTC
+from typing import Optional, Any
+from together import Together
+from openai import OpenAI
 
-from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import (
-    Application, AIORateLimiter,
-    CommandHandler, ContextTypes,
-)
+logger = logging.getLogger("openai_client")
 
-from openai_client import (
-    generate_text,
-    generate_image,
-    generate_video_minimax,
-    generate_video_kling,
-)
+# --- Keys ---
+TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# ---------- базовая настройка ----------
-load_dotenv()
-logging.basicConfig(level=logging.INFO)
-LOG = logging.getLogger("bot")
+# --- Clients ---
+together = Together(api_key=TOGETHER_API_KEY) if TOGETHER_API_KEY else Together()
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else OpenAI()
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN/BOT_TOKEN is not set")
-
-VIDEO_SEM = asyncio.Semaphore(5)
-USER_LOCKS = defaultdict(asyncio.Lock)
-
-
-def build_app() -> Application:
-    return (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .rate_limiter(AIORateLimiter())  # работает при наличии python-telegram-bot[rate-limiter]
-        .build()
-    )
-
-
-# ---------- вспомогательные функции ----------
-def now_utc():
-    return datetime.now(UTC)
-
-def progress_text(prompt: str, started_at: datetime, avg_sec: int = 90) -> str:
-    elapsed = int((now_utc() - started_at).total_seconds())
-    remain = max(0, avg_sec - elapsed)
-    short_prompt = (prompt[:100] + "…") if len(prompt) > 100 else prompt
-    return (
-        "🎬 Генерирую видео…\n"
-        f"⏳ Осталось примерно {remain} сек\n"
-        f"📝 {short_prompt}"
-    )
-
-
-# ---------- команды ----------
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! Я умею:\n"
-        "/text <запрос> — сгенерировать текст\n"
-        "/image <описание> — сгенерировать картинку\n"
-        "/video [minimax|kling] <описание> — сгенерировать видео\n\n"
-        "Примеры:\n"
-        "/video minimax котёнок бежит по траве\n"
-        "/video kling девушка идёт по пляжу на закате"
-    )
-
-
-async def cmd_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    prompt = (update.message.text or "").replace("/text", "", 1).strip()
-    if not prompt:
-        await update.message.reply_text("Напиши текст после команды. Пример: /text идея для поста")
-        return
-    try:
-        reply = await generate_text(prompt)
-        await update.message.reply_text(reply)
-    except Exception as e:
-        LOG.exception("text error: %r", e)
-        await update.message.reply_text("Не удалось сгенерировать текст. Попробуй позже.")
-
-
-async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    prompt = (update.message.text or "").replace("/image", "", 1).strip()
-    if not prompt:
-        await update.message.reply_text("Напиши описание картинки. Пример: /image рыжий кот в очках")
-        return
-    try:
-        url = await generate_image(prompt)
-        await update.message.reply_photo(photo=url, caption="Готово!")
-    except Exception as e:
-        LOG.exception("image error: %r", e)
-        await update.message.reply_text("Не удалось сгенерировать изображение. Попробуй позже.")
-
-
-async def cmd_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").replace("/video", "", 1).strip()
-    if not text:
-        await update.message.reply_text(
-            "Напиши описание видео. Пример: /video minimax котёнок бежит по траве"
+# ========= TEXT =========
+async def generate_text(prompt: str) -> str:
+    """Simple text generation using OpenAI gpt-4o-mini."""
+    def _sync_call() -> str:
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.8,
         )
-        return
+        return resp.choices[0].message.content.strip()
+    return await asyncio.to_thread(_sync_call)
 
-    parts = text.split(" ", 1)
-    if len(parts) == 2 and parts[0].lower() in ("minimax", "kling"):
-        model = parts[0].lower()
-        prompt = parts[1]
-    else:
-        model = "minimax"
-        prompt = text
+# ========= IMAGES =========
+async def generate_image(prompt: str) -> str:
+    """Generate image via OpenAI Images API. Return URL."""
+    def _sync_call() -> str:
+        resp = openai_client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size="1024x1024",
+        )
+        return resp.data[0].url
+    return await asyncio.to_thread(_sync_call)
 
-    if len(prompt) > 600:
-        prompt = prompt[:600]
+# ========= VIDEO Utility =========
+async def _poll_together_video(video_id: str, timeout_sec: int = 600, poll_every: int = 5) -> Optional[str]:
+    """Wait for video completion on Together and return URL."""
+    waited = 0
+    last_status = None
+    while waited < timeout_sec:
+        await asyncio.sleep(poll_every)
+        try:
+            status_obj = together.videos.retrieve(video_id)
+        except Exception as e:
+            logger.error(f"[Together] retrieve error: {e}")
+            return None
+        status = getattr(status_obj, "status", None) or getattr(status_obj, "state", None)
+        if status != last_status:
+            logger.info(f"[Together] Status: {status}")
+            last_status = status
+        if status in ("completed", "succeeded", "success", "done", "finished"):
+            url = _extract_video_url(status_obj)
+            if not url:
+                logger.warning("[Together] completed, but URL not found in response")
+            return url
+        if status in ("failed", "error", "cancelled", "canceled"):
+            logger.error(f"[Together] job finished with status: {status}")
+            return None
+        waited += poll_every
+    logger.error("[Together] Timeout waiting video")
+    return None
 
-    user_id = update.effective_user.id
-    started_at = now_utc()
-
-    # первый статус
-    last_shown = None
-    status_text = progress_text(prompt, started_at)
-    msg = await update.message.reply_text(status_text)
-    last_shown = status_text
-
-    async def worker():
-        nonlocal last_shown
-        async with USER_LOCKS[user_id]:
-            async with VIDEO_SEM:
-                video_func = generate_video_minimax if model == "minimax" else generate_video_kling
-
-                # мягкий тайм-аут на фоне (видео может рендериться долго из-за очереди)
-                refresh_every = 10
-                max_wait = 900  # 15 минут максимум
-                elapsed = 0
-                url = None
-
-                while elapsed < max_wait:
-                    try:
-                        url = await video_func(prompt)
-                        if url:
-                            break
-                        # если URL ещё нет — подождём и обновим статус
-                        await asyncio.sleep(refresh_every)
-                        elapsed += refresh_every
-                        new_text = progress_text(prompt, started_at, avg_sec=120)
-                        # не шлём одинаковый текст, чтобы избежать 400 "Message is not modified"
-                        if new_text != last_shown:
-                            try:
-                                await msg.edit_text(new_text)
-                                last_shown = new_text
-                            except Exception as e:
-                                LOG.warning(f"edit_text warning: {e}")
-                    except Exception as e:
-                        LOG.error(f"Video generation error: {e}")
-                        break
-
-                if url:
-                    # удалим статус и пришлём видео
-                    try:
-                        await msg.delete()
-                    except Exception:
-                        pass
-                    try:
-                        await update.message.reply_video(video=url, caption="Готово! 🎉")
-                    except Exception:
-                        await update.message.reply_text(f"Готово! Ссылка: {url}")
+def _extract_video_url(resp: Any) -> Optional[str]:
+    """Extract video URL from various response formats."""
+    try:
+        output = getattr(resp, "output", None)
+        if isinstance(output, list):
+            for item in output:
+                if isinstance(item, dict):
+                    if "url" in item and isinstance(item["url"], str):
+                        return item["url"]
+                    if "video" in item and isinstance(item["video"], dict) and "url" in item["video"]:
+                        return item["video"]["url"]
                 else:
-                    try:
-                        await msg.edit_text("⚠️ Не удалось сгенерировать видео. Попробуй позже.")
-                    except Exception:
-                        await update.message.reply_text("⚠️ Не удалось сгенерировать видео. Попробуй позже.")
+                    maybe_url = getattr(item, "url", None)
+                    if isinstance(maybe_url, str):
+                        return maybe_url
+        if isinstance(output, dict):
+            if "url" in output and isinstance(output["url"], str):
+                return output["url"]
+            if "video" in output and isinstance(output["video"], dict) and "url" in output["video"]:
+                return output["video"]["url"]
+        assets = getattr(resp, "assets", None)
+        if isinstance(assets, dict):
+            if "video" in assets and isinstance(assets["video"], str) and assets["video"].startswith("http"):
+                return assets["video"]
+        result = getattr(resp, "result", None)
+        if isinstance(result, dict) and "url" in result and isinstance(result["url"], str):
+            return result["url"]
+    except Exception as e:
+        logger.error(f"[Together] URL parse error: {e}")
+    return None
 
-    context.application.create_task(worker())
+# ========= VIDEO: MiniMax =========
+async def generate_video_minimax(prompt: str) -> Optional[str]:
+    """Together MiniMax 01 Director — low-cost model."""
+    try:
+        create = together.videos.create(
+            model="minimax/minimax-01-director",
+            prompt=prompt,
+        )
+        video_id = create.id
+        logger.info(f"[MiniMax] Started video id={video_id}")
+        return await _poll_together_video(video_id, timeout_sec=600, poll_every=5)
+    except Exception as e:
+        logger.error(f"[MiniMax] create error: {e}")
+        return None
 
-
-def main():
-    app = build_app()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("text", cmd_text))
-    app.add_handler(CommandHandler("image", cmd_image))
-    app.add_handler(CommandHandler("video", cmd_video))
-    app.run_polling(drop_pending_updates=True)
-
-
-if __name__ == "__main__":
-    main()
-
-
+# ========= VIDEO: Kling =========
+async def generate_video_kling(prompt: str) -> Optional[str]:
+    """Together Kling 1.6 Standard."""
+    try:
+        create = together.videos.create(
+            model="kwaivgI/kling-1.6-standard",
+            prompt=prompt,
+        )
+        video_id = create.id
+        logger.info(f"[Kling] Started video id={video_id}")
+        return await _poll_together_video(video_id, timeout_sec=900, poll_every=5)
+    except Exception as e:
+        logger.error(f"[Kling] create error: {e}")
+        return None
